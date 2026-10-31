@@ -116,6 +116,17 @@ To use different locations, set `ABP_CONFIG` or `ABP_DATA_DIR`. `ABP_URL` and `A
 - **"playlist on the server does not match after update"?** After every change abp re-reads the playlist to check it. When that check fails abp writes `~/.local/share/abp/mismatch-<id>.txt` comparing what it expected with what the server returned. This message comes from abp, so it won't appear in Audiobookshelf's own logs. Please attach that file if you open an issue.
 - **Changed your server or key?** Press `o` in the TUI.
 
+## Releasing
+
+Maintainers publish a release by pushing a version tag; GitHub Actions then tests, builds and publishes it. `make` does the tagging safely:
+
+    make release-patch            # v0.1.7 -> v0.1.8
+    make release-minor            # v0.1.7 -> v0.2.0
+    make release-major            # v0.1.7 -> v1.0.0
+    make release TAG=v0.2.0-rc1   # an exact version; a "-suffix" publishes a pre-release
+
+Add `DRY_RUN=1` to run all the checks and see what would be released without tagging anything. Before tagging it checks that the version is new and not older than the latest release, that you are on the default branch with a clean tree that matches the remote, and that `fmt-check`, `vet` and `test-race` pass. It then asks for confirmation (`YES=1` skips the prompt, `SKIP_CHECKS=1` skips the checks), creates an annotated tag and pushes it. The logic lives in `scripts/release.sh`.
+
 ## License
 
 abp is free software, released under the [GNU General Public License v3.0](LICENSE). You can redistribute it and/or modify it under the terms of that license; it comes with no warranty.
