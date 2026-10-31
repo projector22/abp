@@ -98,6 +98,33 @@ lint: ## Run golangci-lint (if installed)
 .PHONY: check
 check: fmt-check vet test ## Everything CI should run
 
+##@ Release
+
+# Tagging is done by scripts/release.sh, which refuses to continue unless the tag
+# is new and sensible, the tree is clean and in sync with the remote, and the CI
+# checks pass. Pushing the tag is what makes GitHub Actions publish the release.
+# Options (set on the command line): DRY_RUN=1 to only check, YES=1 to skip the
+# confirmation prompt, SKIP_CHECKS=1 to skip fmt-check/vet/test-race.
+
+.PHONY: release
+release: ## Tag and push a release: make release TAG=v0.2.0 (add DRY_RUN=1 to rehearse)
+	@test -n "$(TAG)" || { \
+		echo "usage: make release TAG=vX.Y.Z   (or: make release-patch|release-minor|release-major)"; \
+		exit 1; }
+	@MAKE_CMD="$(MAKE)" sh scripts/release.sh "$(TAG)"
+
+.PHONY: release-patch
+release-patch: ## Release the next patch version (v0.1.7 -> v0.1.8)
+	@MAKE_CMD="$(MAKE)" sh scripts/release.sh patch
+
+.PHONY: release-minor
+release-minor: ## Release the next minor version (v0.1.7 -> v0.2.0)
+	@MAKE_CMD="$(MAKE)" sh scripts/release.sh minor
+
+.PHONY: release-major
+release-major: ## Release the next major version (v0.1.7 -> v1.0.0)
+	@MAKE_CMD="$(MAKE)" sh scripts/release.sh major
+
 ##@ Housekeeping
 
 .PHONY: tidy
