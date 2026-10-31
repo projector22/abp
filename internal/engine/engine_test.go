@@ -426,3 +426,68 @@ func TestRunOrderOnlyMismatchIsANoteNotAFailure(t *testing.T) {
 		t.Fatalf("expected mismatch report: %v", err)
 	}
 }
+
+// TestCountUnfinished checks the per-playlist "to go" totals: they count every
+// unfinished episode (not just those within the limit), agree with BuildQueue,
+// ignore finished episodes, skip a deleted podcast, and count a podcast shared
+// by two playlists for each of them.
+func TestCountUnfinished(t *testing.T) {
+	f := &fakeABS{finished: map[string]bool{"podA/a1": true}}
+	c, _ := newEnv(t, f, f.handler())
+	ctx := context.Background()
+
+	got, err := CountUnfinished(ctx, c, map[string][]string{
+		"mix":   {"podA", "podB", "gone"},
+		"onlyA": {"podA"},
+		"none":  nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{"mix": 4, "onlyA": 2, "none": 0} {
+		if got[id].Err != nil || got[id].Unfinished != want {
+			t.Errorf("%s: got %+v, want %d unfinished", id, got[id], want)
+		}
+	}
+
+	// It must match what the preview/sync reports as the unfinished total, even
+	// when the playlist limit is far smaller.
+	pl := config.Playlist{ID: "mix", Limit: 1, Podcasts: []config.Podcast{{ID: "podA"}, {ID: "podB"}, {ID: "gone"}}}
+	q, err := BuildQueue(ctx, c, pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Unfinished != got["mix"].Unfinished {
+		t.Errorf("BuildQueue says %d unfinished, CountUnfinished says %d", q.Unfinished, got["mix"].Unfinished)
+	}
+}
+
+// TestCountUnfinishedPodcastError checks that a podcast failing with a real
+// error (not "deleted") only marks the playlists that use it, and leaves the
+// others with their counts.
+func TestCountUnfinishedPodcastError(t *testing.T) {
+	f := &fakeABS{finished: map[string]bool{}}
+	inner := f.handler()
+	broken := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/podB") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	c, _ := newEnv(t, f, broken)
+
+	got, err := CountUnfinished(context.Background(), c, map[string][]string{
+		"ok":  {"podA"},
+		"bad": {"podA", "podB"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["ok"].Err != nil || got["ok"].Unfinished != 3 {
+		t.Errorf("ok playlist: %+v", got["ok"])
+	}
+	if got["bad"].Err == nil {
+		t.Errorf("bad playlist should carry the podcast's error: %+v", got["bad"])
+	}
+}

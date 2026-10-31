@@ -33,6 +33,8 @@ Or build from source (see `make help` for everything else):
 3. Tick the podcasts you want in it. Each press of `tab` or `enter` adds or removes one, and it's saved straight away.
 4. Press `p` to preview what the playlist will contain, then `s` to sync it to Audiobookshelf.
 
+The playlist list also has a **TO GO** column: the total number of unfinished episodes across a playlist's podcasts (not just the ones that fit within its size), so you can see how far you are from the end. It refreshes in the background after a sync and about once a minute.
+
 From then on abp keeps the same playlist up to date for you. Add a schedule (press `c` on a playlist) and it will do this in the background; otherwise sync by hand with `s`.
 
 ## Keys

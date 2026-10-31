@@ -41,12 +41,7 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
 	if err != nil {
 		return nil, err
 	}
-	finished := map[string]bool{}
-	for _, p := range me.MediaProgress {
-		if p.IsFinished && p.EpisodeID != "" {
-			finished[p.LibraryItemID+"/"+p.EpisodeID] = true
-		}
-	}
+	finished := finishedEpisodes(me)
 
 	type result struct {
 		det *abp.PodcastDetail
@@ -123,6 +118,104 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
 	}
 	q.Items = all
 	return q, nil
+}
+
+// finishedEpisodes returns the set of episodes the user has finished, keyed by
+// library item id plus episode id.
+func finishedEpisodes(me *abp.Me) map[string]bool {
+	finished := map[string]bool{}
+	for _, p := range me.MediaProgress {
+		if p.IsFinished && p.EpisodeID != "" {
+			finished[p.LibraryItemID+"/"+p.EpisodeID] = true
+		}
+	}
+	return finished
+}
+
+// Remaining is how many unfinished episodes a playlist's podcasts hold in total,
+// i.e. how many are still to go before the playlist's podcasts are all caught up.
+// It is the same number BuildQueue reports as Queue.Unfinished. Err is set (and
+// Unfinished meaningless) when one of the playlist's podcasts could not be read.
+type Remaining struct {
+	Unfinished int
+	Err        error
+}
+
+// CountUnfinished counts, for each playlist, the unfinished episodes across its
+// podcasts. podcasts maps a playlist id to the ids of its podcasts. It reads the
+// user's progress once and each distinct podcast once, however many playlists
+// share it, and writes nothing. A podcast that no longer exists is skipped, as in
+// BuildQueue. Any other failure marks only the playlists using that podcast; an
+// error is returned only when the progress itself cannot be read.
+func CountUnfinished(ctx context.Context, c *abp.Client, podcasts map[string][]string) (map[string]Remaining, error) {
+	me, err := c.Me(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finished := finishedEpisodes(me)
+
+	// Fetch each distinct podcast once, at most 4 requests in flight.
+	type result struct {
+		unfinished int
+		missing    bool
+		err        error
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, list := range podcasts {
+		for _, id := range list {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	results := make([]result, len(ids))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			d, err := c.PodcastDetail(ctx, id)
+			if err != nil {
+				results[i] = result{missing: errors.Is(err, abp.ErrNotFound), err: err}
+				return
+			}
+			n := 0
+			for _, e := range d.Episodes {
+				if !finished[id+"/"+e.ID] {
+					n++
+				}
+			}
+			results[i] = result{unfinished: n}
+		}(i, id)
+	}
+	wg.Wait()
+	byID := make(map[string]result, len(ids))
+	for i, id := range ids {
+		byID[id] = results[i]
+	}
+
+	out := make(map[string]Remaining, len(podcasts))
+	for plID, list := range podcasts {
+		var r Remaining
+		for _, id := range list {
+			pr := byID[id]
+			switch {
+			case pr.missing:
+				continue
+			case pr.err != nil:
+				r.Err = pr.err
+			default:
+				r.Unfinished += pr.unfinished
+			}
+		}
+		out[plID] = r
+	}
+	return out, nil
 }
 
 type Result struct {

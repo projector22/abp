@@ -22,8 +22,8 @@ func newList(a *app) *listScreen { return &listScreen{a: a} }
 // Title is the breadcrumb label shown in the header for this screen.
 func (s *listScreen) Title() string { return "Playlists" }
 
-// Init does nothing; the list has no background work to start.
-func (s *listScreen) Init() tea.Cmd { return nil }
+// Init starts loading how many unfinished episodes each playlist has to go.
+func (s *listScreen) Init() tea.Cmd { return s.a.remainingCmd() }
 
 // Help returns the key hints for the footer (hidden while a confirmation is
 // open, which shows its own keys).
@@ -98,6 +98,24 @@ func (s *listScreen) Update(msg tea.Msg) (screen, tea.Cmd) {
 	return s, nil
 }
 
+// remainingBadge renders the "to go" column: the total number of unfinished
+// episodes across the playlist's podcasts, not just the ones that fit in its
+// limit. It shows "…" until the first load finishes, "?" if a podcast could not
+// be read and nothing is known yet, and "0" muted when everything is finished.
+func (a *app) remainingBadge(p config.Playlist) string {
+	r, ok := a.remaining[p.ID]
+	switch {
+	case !ok:
+		return sMuted.Render("…")
+	case r.Err != nil:
+		return sWarn.Render("?")
+	case r.Unfinished == 0:
+		return sMuted.Render("0")
+	default:
+		return sText.Render(fmt.Sprintf("%d", r.Unfinished))
+	}
+}
+
 // scheduleBadge renders a playlist's schedule for the list: "manual" when it has
 // none, a green dot when the schedule is installed in the crontab, and a hollow
 // amber dot when it is configured but not (yet) installed.
@@ -125,7 +143,7 @@ func syncBadge(st config.PlaylistState) string {
 	}
 }
 
-// View draws the playlist table (name, size, podcast count, schedule, last sync)
+// View draws the playlist table (name, size, episodes to go, podcast count, schedule, last sync)
 // with the selected row highlighted, the last result of the selected playlist,
 // any crontab problem, and an open confirmation. With no playlists it shows a
 // short welcome instead.
@@ -142,19 +160,20 @@ func (s *listScreen) View(w, h int) string {
 
 	const (
 		wSize  = 9
+		wLeft  = 12
 		wPods  = 10
 		wSched = 22
 		wSync  = 18
 		wRun   = 18
 	)
-	wName := w - 2 - wSize - wPods - wSched - wSync - wRun
+	wName := w - 2 - wSize - wLeft - wPods - wSched - wSync - wRun
 	if wName < 12 {
 		wName = 12
 	}
 
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString("  " + sColHdr.Render(cell("PLAYLIST", wName)+cell("SIZE", wSize)+cell("PODCASTS", wPods)+cell("SCHEDULE", wSched)+cell("LAST SYNC", wSync)+"LAST RUN") + "\n")
+	b.WriteString("  " + sColHdr.Render(cell("PLAYLIST", wName)+cell("SIZE", wSize)+cell("TO GO", wLeft)+cell("PODCASTS", wPods)+cell("SCHEDULE", wSched)+cell("LAST SYNC", wSync)+"LAST RUN") + "\n")
 
 	avail := h - 4
 	if s.confirm != nil {
@@ -173,6 +192,7 @@ func (s *listScreen) View(w, h int) string {
 		sched += strings.Repeat(" ", max(0, wSched-visibleWidth(sched)))
 		b.WriteString(cursor + name +
 			sText.Render(cell(fmt.Sprintf("%d eps", p.Limit), wSize)) +
+			cell0(s.a.remainingBadge(p), wLeft) +
 			sText.Render(cell(fmt.Sprintf("%d", len(p.Podcasts)), wPods)) +
 			sched + cell0(syncBadge(st), wSync) + runBadge(s.a, p, st) + "\n")
 	}

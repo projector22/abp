@@ -12,6 +12,7 @@ import (
 
 	"github.com/projector22/abp/internal/abp"
 	"github.com/projector22/abp/internal/config"
+	"github.com/projector22/abp/internal/engine"
 	"github.com/projector22/abp/internal/version"
 )
 
@@ -248,5 +249,61 @@ func TestSpinnerOnlyRunsWhileBusy(t *testing.T) {
 	}
 	if _, cmd := r.Update(busyMsg{"Again…"}); cmd == nil {
 		t.Fatal("a later busy period must be able to restart the spinner")
+	}
+}
+
+// TestListShowsEpisodesToGo checks the "to go" column: "…" until the counts have
+// loaded, then each playlist's total unfinished episodes (which may exceed its
+// limit), "?" when a podcast could not be read, and a muted 0 when done.
+func TestListShowsEpisodesToGo(t *testing.T) {
+	t.Setenv("ABP_DATA_DIR", t.TempDir())
+	t.Setenv("ABP_CONFIG", t.TempDir()+"/config.yaml")
+	a := &app{
+		cfg: &config.Config{Playlists: []config.Playlist{
+			{ID: "big", Name: "Big", Limit: 5},
+			{ID: "bad", Name: "Bad", Limit: 5},
+			{ID: "done", Name: "Done", Limit: 5},
+		}},
+		state:    config.LoadState(),
+		podcasts: map[string][]abp.LibraryItem{},
+		managed:  map[string]string{},
+	}
+	r := newRoot(a, newList(a))
+	r.Update(tea.WindowSizeMsg{Width: 130, Height: 24})
+
+	row := func(name string) string {
+		for _, line := range strings.Split(r.View(), "\n") {
+			if strings.Contains(line, name+" ") && strings.Contains(line, "eps") {
+				return line
+			}
+		}
+		t.Fatalf("no row for %s", name)
+		return ""
+	}
+	if !strings.Contains(r.View(), "TO GO") {
+		t.Error("expected a TO GO heading")
+	}
+	if !strings.Contains(row("Big"), "…") {
+		t.Errorf("before loading the column should show …: %s", row("Big"))
+	}
+
+	r.Update(remainingMsg{res: map[string]engine.Remaining{
+		"big":  {Unfinished: 137},
+		"bad":  {Err: errors.New("boom")},
+		"done": {},
+	}})
+	for name, want := range map[string]string{"Big": "5 eps", "Bad": "?", "Done": "0"} {
+		if !strings.Contains(row(name), want) {
+			t.Errorf("%s row should contain %q: %s", name, want, row(name))
+		}
+	}
+	if !strings.Contains(row("Big"), "137") {
+		t.Errorf("Big row should show 137 to go: %s", row("Big"))
+	}
+
+	// A failed reload keeps the last good number rather than flickering to "?".
+	r.Update(remainingMsg{res: map[string]engine.Remaining{"big": {Err: errors.New("blip")}}})
+	if !strings.Contains(row("Big"), "137") {
+		t.Errorf("a failed reload should keep the previous count: %s", row("Big"))
 	}
 }

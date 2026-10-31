@@ -31,6 +31,13 @@ type app struct {
 	managed map[string]string // crontab: playlist id -> schedule
 	cronErr error
 
+	// remaining caches, per playlist id, how many unfinished episodes its
+	// podcasts hold in total (the "to go" column on the list). It is loaded in
+	// the background and refreshed now and then; screens only ever read it.
+	remaining  map[string]engine.Remaining
+	remLoading bool // a load is in flight
+	remDirty   bool // a refresh was asked for while loading; run again when done
+
 	build  version.Build  // which abp this is (shown in the header)
 	update version.Result // latest update-check answer; zero value until it arrives
 }
@@ -88,6 +95,12 @@ type (
 	// screens pick up changes made by other abp processes (cron runs) and keeps
 	// relative times such as "12m ago" current.
 	refreshTickMsg struct{}
+
+	// remainingMsg carries the unfinished-episode counts for every playlist.
+	remainingMsg struct {
+		res map[string]engine.Remaining
+		err error
+	}
 
 	// cronRefreshedMsg carries a fresh reading of abp's crontab entries.
 	cronRefreshedMsg struct {
@@ -150,6 +163,43 @@ func (a *app) syncCmd(id string) tea.Cmd {
 		res, err := engine.Run(ctx, client, pl, a.state, false)
 		return syncDoneMsg{name: pl.Name, res: res, err: err}
 	})
+}
+
+// remainingEvery is how many refresh ticks pass between reloads of the
+// unfinished-episode counts. They cost one request per podcast, so this is much
+// rarer than the state-file refresh.
+const remainingEvery = 12
+
+// remainingCmd reloads, in the background, the number of unfinished episodes of
+// every playlist and reports back with a remainingMsg. If a load is already
+// running it asks for another when that one finishes, so a change made meanwhile
+// (e.g. adding a podcast) is never missed. It does nothing without a server
+// connection or playlists. The podcast ids are copied so the goroutine never
+// touches config that the UI may be editing meanwhile.
+func (a *app) remainingCmd() tea.Cmd {
+	if a.client == nil || len(a.cfg.Playlists) == 0 {
+		return nil
+	}
+	if a.remLoading {
+		a.remDirty = true
+		return nil
+	}
+	a.remLoading = true
+	pods := make(map[string][]string, len(a.cfg.Playlists))
+	for _, p := range a.cfg.Playlists {
+		ids := make([]string, len(p.Podcasts))
+		for i, pc := range p.Podcasts {
+			ids[i] = pc.ID
+		}
+		pods[p.ID] = ids
+	}
+	client := a.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		res, err := engine.CountUnfinished(ctx, client, pods)
+		return remainingMsg{res, err}
+	}
 }
 
 // syncAllCmd syncs every playlist one after another in the background and
@@ -308,6 +358,9 @@ func (r *root) Init() tea.Cmd {
 // busy messages, sync results) and forwards every other message to the screen on
 // top of the stack, replacing it with whatever updated screen comes back.
 func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// refresh is set by messages that may have changed what the playlists
+	// contain (a finished sync); the unfinished counts are reloaded after them.
+	refresh := false
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		r.w, r.h = m.Width, m.Height
@@ -333,10 +386,33 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// "12m ago" style ages.
 		r.a.state.Reload()
 		r.ticks++
+		cmds := []tea.Cmd{refreshTick()}
 		if r.ticks%cronEvery == 0 {
-			return r, tea.Batch(refreshTick(), refreshCronCmd())
+			cmds = append(cmds, refreshCronCmd())
 		}
-		return r, refreshTick()
+		if r.ticks%remainingEvery == 0 {
+			cmds = append(cmds, r.a.remainingCmd())
+		}
+		return r, tea.Batch(cmds...)
+	case remainingMsg:
+		r.a.remLoading = false
+		if m.err == nil {
+			// Merge rather than replace: a playlist whose podcasts failed this time
+			// keeps its last good number instead of flickering to "?".
+			next := make(map[string]engine.Remaining, len(m.res))
+			for id, v := range m.res {
+				if old, ok := r.a.remaining[id]; ok && v.Err != nil && old.Err == nil {
+					v = old
+				}
+				next[id] = v
+			}
+			r.a.remaining = next
+		}
+		if r.a.remDirty {
+			r.a.remDirty = false
+			return r, r.a.remainingCmd()
+		}
+		return r, nil
 	case cronRefreshedMsg:
 		r.a.managed, r.a.cronErr = m.managed, m.err
 		return r, nil
@@ -350,7 +426,9 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(r.stack) > 1 {
 			r.stack = r.stack[:len(r.stack)-1]
 		}
-		return r, nil
+		// The screen we are returning to may follow podcast edits made on the one
+		// we left, so bring the counts up to date.
+		return r, r.a.remainingCmd()
 	case statusMsg:
 		r.status = m
 		return r, nil
@@ -369,6 +447,7 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return r, nil
 	case syncDoneMsg:
+		refresh = true
 		// A sync finished: stop the spinner and summarise. Warnings (e.g. a podcast
 		// that no longer exists) are shown like errors so they aren't missed.
 		r.busy = ""
@@ -381,6 +460,7 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.status = statusMsg{text: fmt.Sprintf("%s: %s", m.name, m.res.Summary())}
 		}
 	case syncAllDoneMsg:
+		refresh = true
 		r.busy = ""
 		r.status = statusMsg{text: fmt.Sprintf("Synced %d playlists", m.ok), err: m.failed > 0}
 		if m.failed > 0 {
@@ -391,6 +471,9 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Anything not handled above belongs to the screen on top of the stack.
 	s, cmd := r.top().Update(msg)
 	r.stack[len(r.stack)-1] = s
+	if refresh {
+		cmd = tea.Batch(cmd, r.a.remainingCmd())
+	}
 	return r, cmd
 }
 
